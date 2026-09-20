@@ -1,0 +1,382 @@
+import { Palette, Metrics, CellBox, HeaderBox } from "theme.slint";
+import { GridView } from "grid.slint";
+
+export { Palette, Metrics, CellBox, HeaderBox }
+
+// One sheet tab.
+export struct SheetTab {
+    name: string,
+    active: bool,
+}
+
+export component MainWindow inherits Window {
+    title: "FerrumGrid";
+    icon: @image-url("../../../assets/icons/ferrum-grid-256.png");
+    preferred-width: 1280px;
+    preferred-height: 820px;
+    min-width: 640px;
+    min-height: 400px;
+    background: Palette.chrome;
+    // The window follows the palette rather than the platform, because the
+    // theme is the product's and is switchable.
+    default-font-family: Metrics.font-family;
+
+    in property <[CellBox]> cells;
+    in property <[HeaderBox]> columns;
+    in property <[HeaderBox]> rows;
+    in property <[SheetTab]> tabs;
+
+    in property <length> offset-x;
+    in property <length> offset-y;
+    in property <int> sel-top;
+    in property <int> sel-left;
+    in property <int> sel-bottom;
+    in property <int> sel-right;
+    in property <int> active-row;
+    in property <int> active-col;
+    in property <bool> active-visible;
+    in property <length> active-x;
+    in property <length> active-y;
+    in property <length> active-w;
+    in property <length> active-h;
+    in property <float> h-thumb-start;
+    in property <float> h-thumb-size;
+    in property <float> v-thumb-start;
+    in property <float> v-thumb-size;
+
+    in property <string> name-box;
+    in property <string> formula-text;
+    in property <string> status-text;
+    in property <string> selection-summary;
+    in property <bool> editing;
+    in property <string> edit-text;
+    in property <bool> dark;
+    in-out property <bool> shift-held;
+
+    callback pointer-down(length, length, bool);
+    callback pointer-move(length, length);
+    callback scrolled(length, length);
+    callback select-all();
+    callback edit-changed(string);
+    callback edit-committed();
+    callback scroll-to-fraction(bool, float);
+    callback column-header-pressed(length);
+    callback column-header-dragged(length);
+    callback row-header-pressed(length);
+    callback row-header-dragged(length);
+    callback header-released();
+    pure callback column-edge-near(length) -> bool;
+    pure callback row-edge-near(length) -> bool;
+    callback key-pressed(/* key */ string, /* ctrl */ bool, /* shift */ bool) -> bool;
+    callback formula-edited(string);
+    callback formula-committed();
+    callback tab-selected(int);
+    callback add-sheet();
+    callback toggle-theme();
+    callback viewport-changed();
+
+    // How much room the cells actually have, which is what decides how many
+    // of them Rust builds.
+    out property <length> viewport-w: grid.width - Metrics.row-header-width - Metrics.scrollbar;
+    out property <length> viewport-h: grid.height - Metrics.col-header-height - Metrics.scrollbar;
+    changed viewport-w => { root.viewport-changed(); }
+    changed viewport-h => { root.viewport-changed(); }
+
+    // Keyboard goes through one scope covering the whole window, so a key
+    // means the same thing wherever the pointer happens to be.
+    forward-focus: keys;
+
+    keys := FocusScope {
+        // A focus scope has no size of its own, so without this the layout
+        // inside it takes its preferred height and the status bar falls off
+        // the bottom of the window.
+        width: 100%;
+        height: 100%;
+
+        // Special keys arrive as private-use characters. Naming them here
+        // keeps key codes out of the Rust side entirely.
+        function name-of(event: KeyEvent) -> string {
+            if (event.text == Key.UpArrow) { return "up"; }
+            if (event.text == Key.DownArrow) { return "down"; }
+            if (event.text == Key.LeftArrow) { return "left"; }
+            if (event.text == Key.RightArrow) { return "right"; }
+            if (event.text == Key.PageUp) { return "pageup"; }
+            if (event.text == Key.PageDown) { return "pagedown"; }
+            if (event.text == Key.Home) { return "home"; }
+            if (event.text == Key.End) { return "end"; }
+            if (event.text == Key.Return) { return "enter"; }
+            if (event.text == Key.Tab) { return "tab"; }
+            if (event.text == Key.Backtab) { return "tab"; }
+            if (event.text == Key.Escape) { return "escape"; }
+            if (event.text == Key.Delete) { return "delete"; }
+            if (event.text == Key.Backspace) { return "backspace"; }
+            if (event.text == Key.F2) { return "edit"; }
+            return event.text;
+        }
+
+        key-pressed(event) => {
+            root.shift-held = event.modifiers.shift;
+            if (root.key-pressed(name-of(event), event.modifiers.control,
+                                 event.modifiers.shift)) {
+                return accept;
+            }
+            return reject;
+        }
+        key-released(event) => {
+            root.shift-held = event.modifiers.shift;
+            return reject;
+        }
+
+        VerticalLayout {
+            spacing: 0;
+            padding: 0;
+
+            // Toolbar.
+            Rectangle {
+                height: Metrics.toolbar-height;
+                background: Palette.chrome;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: "FerrumGrid";
+                        vertical-alignment: center;
+                        font-size: 15px;
+                        font-weight: 700;
+                        color: Palette.brand;
+                    }
+
+                    Rectangle { width: 16px; }
+
+                    Rectangle {
+                        width: 92px;
+                        y: 6px;
+                        height: parent.height - 12px;
+                        border-radius: 4px;
+                        background: theme-touch.has-hover ? Palette.header : Palette.surface;
+                        border-width: 1px;
+                        border-color: Palette.divider;
+                        Text {
+                            text: root.dark ? "Light theme" : "Dark theme";
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            font-size: 12px;
+                            color: Palette.text-secondary;
+                        }
+                        theme-touch := TouchArea {
+                            clicked => { root.toggle-theme(); }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Palette.divider;
+                }
+            }
+
+            // Name box and formula bar.
+            Rectangle {
+                height: Metrics.formula-bar-height;
+                background: Palette.surface;
+
+                HorizontalLayout {
+                    spacing: 0;
+
+                    Rectangle {
+                        width: 120px;
+                        background: Palette.surface;
+                        Text {
+                            x: 8px;
+                            text: root.name-box;
+                            vertical-alignment: center;
+                            font-size: Metrics.font-size;
+                            color: Palette.text-primary;
+                        }
+                        Rectangle {
+                            x: parent.width - 1px;
+                            width: 1px;
+                            background: Palette.divider;
+                        }
+                    }
+
+                    Rectangle {
+                        width: 30px;
+                        background: Palette.surface;
+                        Text {
+                            text: "fx";
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            font-size: 13px;
+                            font-italic: true;
+                            color: Palette.text-muted;
+                        }
+                        Rectangle {
+                            x: parent.width - 1px;
+                            width: 1px;
+                            background: Palette.divider;
+                        }
+                    }
+
+                    Rectangle {
+                        background: Palette.surface;
+                        TextInput {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            height: 100%;
+                            text: root.formula-text;
+                            vertical-alignment: center;
+                            single-line: true;
+                            font-size: Metrics.font-size;
+                            color: Palette.text-primary;
+                            edited => { root.formula-edited(self.text); }
+                            accepted => {
+                                root.formula-committed();
+                                keys.focus();
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Palette.divider;
+                }
+            }
+
+            // The sheet.
+            grid := GridView {
+                cells: root.cells;
+                columns: root.columns;
+                rows: root.rows;
+                offset-x: root.offset-x;
+                offset-y: root.offset-y;
+                sel-top: root.sel-top;
+                sel-left: root.sel-left;
+                sel-bottom: root.sel-bottom;
+                sel-right: root.sel-right;
+                active-row: root.active-row;
+                active-col: root.active-col;
+                active-visible: root.active-visible;
+                active-x: root.active-x;
+                active-y: root.active-y;
+                active-w: root.active-w;
+                active-h: root.active-h;
+                h-thumb-start: root.h-thumb-start;
+                h-thumb-size: root.h-thumb-size;
+                v-thumb-start: root.v-thumb-start;
+                v-thumb-size: root.v-thumb-size;
+                editing: root.editing;
+                edit-text: root.edit-text;
+                shift-held: root.shift-held;
+
+                pointer-down(x, y, extend) => { root.pointer-down(x, y, extend); }
+                pointer-move(x, y) => { root.pointer-move(x, y); }
+                scrolled(dx, dy) => { root.scrolled(dx, dy); }
+                select-all() => { root.select-all(); }
+                edit-changed(t) => { root.edit-changed(t); }
+                edit-committed() => {
+                    root.edit-committed();
+                    keys.focus();
+                }
+                scroll-to-fraction(h, f) => { root.scroll-to-fraction(h, f); }
+                column-header-pressed(x) => { root.column-header-pressed(x); }
+                column-header-dragged(x) => { root.column-header-dragged(x); }
+                row-header-pressed(y) => { root.row-header-pressed(y); }
+                row-header-dragged(y) => { root.row-header-dragged(y); }
+                header-released() => { root.header-released(); }
+                column-edge-near(x) => { return root.column-edge-near(x); }
+                row-edge-near(y) => { return root.row-edge-near(y); }
+            }
+
+            // Sheet tabs.
+            Rectangle {
+                height: Metrics.tab-bar-height;
+                background: Palette.chrome;
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    spacing: 2px;
+                    alignment: start;
+
+                    for tab[i] in root.tabs: Rectangle {
+                        width: max(72px, tab-label.preferred-width + 24px);
+                        background: tab.active ? Palette.canvas : Palette.chrome;
+                        border-radius: 4px;
+
+                        tab-label := Text {
+                            text: tab.name;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            font-size: 13px;
+                            font-weight: tab.active ? 700 : 400;
+                            color: tab.active ? Palette.text-primary : Palette.text-secondary;
+                        }
+                        // The active tab is marked by a bar as well as by
+                        // weight, so it does not rely on colour alone.
+                        if tab.active: Rectangle {
+                            y: parent.height - 2px;
+                            height: 2px;
+                            background: Palette.accent;
+                        }
+                        TouchArea {
+                            clicked => { root.tab-selected(i); }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 28px;
+                        Text {
+                            text: "+";
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            font-size: 17px;
+                            color: add-touch.has-hover ? Palette.accent : Palette.text-muted;
+                        }
+                        add-touch := TouchArea {
+                            clicked => { root.add-sheet(); }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: 0;
+                    height: 1px;
+                    background: Palette.divider;
+                }
+            }
+
+            // Status bar.
+            Rectangle {
+                height: Metrics.status-bar-height;
+                background: Palette.surface;
+
+                Text {
+                    x: 10px;
+                    text: root.status-text;
+                    vertical-alignment: center;
+                    font-size: 12px;
+                    color: Palette.text-secondary;
+                }
+                Text {
+                    x: parent.width - self.preferred-width - 12px;
+                    text: root.selection-summary;
+                    vertical-alignment: center;
+                    font-size: 12px;
+                    color: Palette.text-secondary;
+                }
+                Rectangle {
+                    y: 0;
+                    height: 1px;
+                    background: Palette.divider;
+                }
+            }
+        }
+    }
+}

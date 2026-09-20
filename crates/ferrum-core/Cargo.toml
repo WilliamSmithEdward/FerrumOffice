@@ -1,0 +1,13 @@
+[package]
+name = "ferrum-core"
+description = "Value, error and coordinate types shared by every FerrumOffice application."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

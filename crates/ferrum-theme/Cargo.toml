@@ -1,0 +1,16 @@
+[package]
+name = "ferrum-theme"
+description = "Colour tokens and grid metrics shared by every FerrumOffice surface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Only the workspace's own crates, by policy.
+# See docs/adr/0002-no-runtime-dependencies.md.
+[dependencies]
+ferrum-core.workspace = true
+
+[lints]
+workspace = true

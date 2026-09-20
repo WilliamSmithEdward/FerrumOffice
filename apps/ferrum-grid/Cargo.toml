@@ -1,0 +1,38 @@
+[package]
+name = "ferrum-grid"
+description = "FerrumGrid: the spreadsheet application."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferrum-core.workspace = true
+ferrum-theme.workspace = true
+ferrum-calc.workspace = true
+ferrum-sheet.workspace = true
+# The one third-party dependency the product carries, and only because
+# AGENTS.md names it as the interface technology. See
+# docs/adr/0002-no-runtime-dependencies.md.
+slint = { version = "1.18", default-features = false, features = [
+    "compat-1-2",
+    "backend-winit",
+    "renderer-femtovg",
+    "std",
+] }
+
+[build-dependencies]
+slint-build = "1.18"
+
+# This crate cannot inherit the workspace lints. The interface compiler
+# generates code that carries its own `#[allow(unsafe_code)]`, and `forbid`
+# is deliberately not overridable even from inside the file it applies to.
+# `deny` keeps hand-written unsafe out of this crate, which is the actual
+# intent, while letting the generated code through. Every library crate still
+# forbids it outright.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

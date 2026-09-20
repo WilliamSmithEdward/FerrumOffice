@@ -1,0 +1,16 @@
+# Build output
+/target/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local agent instructions. They point at paths on one machine and are not
+# part of the product.
+AGENTS.md
+CLAUDE.md

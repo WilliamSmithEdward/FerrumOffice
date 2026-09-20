@@ -1,0 +1,413 @@
+import { Palette, Metrics, CellBox, HeaderBox } from "theme.slint";
+
+// The cell area, its headers, and the scrollbars.
+//
+// Only the visible cells exist as elements. Rust decides which those are and
+// hands them over already positioned, relative to the top-left of the visible
+// window, so scrolling within a row shifts one container rather than
+// rebuilding anything.
+export component GridView inherits Rectangle {
+    in property <[CellBox]> cells;
+    in property <[HeaderBox]> columns;
+    in property <[HeaderBox]> rows;
+
+    // Sub-cell scroll offset, applied as a translation. Always zero or
+    // negative.
+    in property <length> offset-x;
+    in property <length> offset-y;
+
+    // The selected block, in cell indices. A single cell has equal corners.
+    in property <int> sel-top;
+    in property <int> sel-left;
+    in property <int> sel-bottom;
+    in property <int> sel-right;
+    in property <int> active-row;
+    in property <int> active-col;
+
+    // Where the active cell sits inside the visible window, and whether it is
+    // inside it at all. Rust keeps these in step with the cell model.
+    in property <bool> active-visible;
+    in property <length> active-x;
+    in property <length> active-y;
+    in property <length> active-w;
+    in property <length> active-h;
+
+    // Scrollbar thumbs, as fractions of their track.
+    in property <float> h-thumb-start;
+    in property <float> h-thumb-size;
+    in property <float> v-thumb-start;
+    in property <float> v-thumb-size;
+
+    in property <bool> editing;
+    in property <string> edit-text;
+    in property <bool> shift-held;
+
+    callback pointer-down(/* x */ length, /* y */ length, /* extend */ bool);
+    callback pointer-move(/* x */ length, /* y */ length);
+    callback scrolled(/* dx */ length, /* dy */ length);
+    callback select-all();
+    callback edit-changed(string);
+    callback edit-committed();
+    callback scroll-to-fraction(/* horizontal */ bool, /* fraction */ float);
+    callback column-header-pressed(/* x along the band */ length);
+    callback column-header-dragged(length);
+    callback row-header-pressed(/* y along the band */ length);
+    callback row-header-dragged(length);
+    callback header-released();
+    // Answers whether the pointer is over a draggable edge, so the cursor can
+    // say so. Returns rather than sets, which keeps a plain hover from
+    // triggering a redraw.
+    pure callback column-edge-near(length) -> bool;
+    pure callback row-edge-near(length) -> bool;
+
+    background: Palette.canvas;
+
+    // The grid fills whatever room the layout has, and asks its children for
+    // nothing. Without this the layout asks the grid how big it wants to be,
+    // the grid asks its children, and the children answer with the grid's own
+    // width: a cycle that ends in a stack overflow before the window opens.
+    preferred-width: 0px;
+    preferred-height: 0px;
+    min-width: 240px;
+    min-height: 120px;
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
+
+    // The corner between the two headers selects everything.
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: Metrics.row-header-width;
+        height: Metrics.col-header-height;
+        background: Palette.header;
+        TouchArea {
+            clicked => { root.select-all(); }
+        }
+        Rectangle {
+            x: parent.width - 1px;
+            width: 1px;
+            background: Palette.divider;
+        }
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            background: Palette.divider;
+        }
+    }
+
+    // Column letters.
+    Rectangle {
+        x: Metrics.row-header-width;
+        y: 0;
+        width: parent.width - Metrics.row-header-width - Metrics.scrollbar;
+        height: Metrics.col-header-height;
+        background: Palette.header;
+        clip: true;
+
+        Rectangle {
+            x: root.offset-x;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+
+            for column in root.columns: Rectangle {
+                x: column.pos;
+                y: 0;
+                width: column.size;
+                height: Metrics.col-header-height;
+                // A column inside the selection is marked, so the block can be
+                // found from the edge of the sheet.
+                background: (column.index >= root.sel-left && column.index <= root.sel-right)
+                    ? Palette.selection
+                    : Palette.header;
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: column.label;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: Metrics.font-size;
+                    font-family: Metrics.font-family;
+                    color: Palette.text-secondary;
+                }
+                Rectangle {
+                    x: parent.width - 1px;
+                    width: 1px;
+                    background: Palette.divider;
+                }
+            }
+        }
+
+        // One area for the whole band. Per-column areas would be rebuilt on
+        // every scroll, and an area filling a cell shadows any sibling laid
+        // over its edge.
+        column-touch := TouchArea {
+            property <bool> on-edge;
+            width: 100%;
+            height: 100%;
+            mouse-cursor: self.on-edge ? MouseCursor.col-resize : MouseCursor.default;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.column-header-pressed(self.mouse-x);
+                } else if (event.kind == PointerEventKind.up) {
+                    root.header-released();
+                }
+            }
+            moved => {
+                if (self.pressed) {
+                    root.column-header-dragged(self.mouse-x);
+                } else {
+                    self.on-edge = root.column-edge-near(self.mouse-x);
+                }
+            }
+        }
+
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            background: Palette.divider;
+        }
+    }
+
+    // Row numbers.
+    Rectangle {
+        x: 0;
+        y: Metrics.col-header-height;
+        width: Metrics.row-header-width;
+        height: parent.height - Metrics.col-header-height - Metrics.scrollbar;
+        background: Palette.header;
+        clip: true;
+
+        Rectangle {
+            x: 0;
+            y: root.offset-y;
+            width: parent.width;
+            height: parent.height;
+
+            for row in root.rows: Rectangle {
+                x: 0;
+                y: row.pos;
+                width: Metrics.row-header-width;
+                height: row.size;
+                background: (row.index >= root.sel-top && row.index <= root.sel-bottom)
+                    ? Palette.selection
+                    : Palette.header;
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: row.label;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: Metrics.font-size;
+                    font-family: Metrics.font-family;
+                    color: Palette.text-secondary;
+                }
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Palette.divider;
+                }
+            }
+        }
+
+        row-touch := TouchArea {
+            property <bool> on-edge;
+            width: 100%;
+            height: 100%;
+            mouse-cursor: self.on-edge ? MouseCursor.row-resize : MouseCursor.default;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.row-header-pressed(self.mouse-y);
+                } else if (event.kind == PointerEventKind.up) {
+                    root.header-released();
+                }
+            }
+            moved => {
+                if (self.pressed) {
+                    root.row-header-dragged(self.mouse-y);
+                } else {
+                    self.on-edge = root.row-edge-near(self.mouse-y);
+                }
+            }
+        }
+
+        Rectangle {
+            x: parent.width - 1px;
+            width: 1px;
+            background: Palette.divider;
+        }
+    }
+
+    // The cells.
+    Rectangle {
+        x: Metrics.row-header-width;
+        y: Metrics.col-header-height;
+        width: parent.width - Metrics.row-header-width - Metrics.scrollbar;
+        height: parent.height - Metrics.col-header-height - Metrics.scrollbar;
+        background: Palette.canvas;
+        clip: true;
+
+        Rectangle {
+            x: root.offset-x;
+            y: root.offset-y;
+            width: parent.width;
+            height: parent.height;
+
+            for cell in root.cells: Rectangle {
+                property <bool> in-selection:
+                    cell.row >= root.sel-top && cell.row <= root.sel-bottom &&
+                    cell.col >= root.sel-left && cell.col <= root.sel-right;
+                property <bool> is-active: cell.row == root.active-row && cell.col == root.active-col;
+
+                x: cell.x;
+                y: cell.y;
+                width: cell.w;
+                height: cell.h;
+                // The active cell stays on the plain canvas, so it reads as
+                // the one being worked on rather than part of the block.
+                background: (in-selection && !is-active) ? Palette.selection : Palette.canvas;
+
+                Text {
+                    x: 3px;
+                    width: parent.width - 6px;
+                    height: 100%;
+                    text: cell.text;
+                    horizontal-alignment: cell.align-right ? right : left;
+                    vertical-alignment: center;
+                    overflow: clip;
+                    font-size: Metrics.font-size;
+                    font-family: Metrics.font-family;
+                    color: cell.is-error ? Palette.danger : Palette.text-primary;
+                }
+
+                // Hairlines on the right and bottom only, so neighbouring
+                // cells share one line instead of drawing two.
+                Rectangle {
+                    x: parent.width - 1phx;
+                    width: 1phx;
+                    background: Palette.gridline;
+                }
+                Rectangle {
+                    y: parent.height - 1phx;
+                    height: 1phx;
+                    background: Palette.gridline;
+                }
+            }
+
+            // The active cell's outline, drawn after the cells so a
+            // neighbour cannot paint over it.
+            if root.active-visible && !root.editing: Rectangle {
+                x: root.active-x;
+                y: root.active-y;
+                width: root.active-w;
+                height: root.active-h;
+                border-width: 2px;
+                border-color: Palette.accent;
+                background: transparent;
+            }
+
+            // The in-cell editor.
+            if root.editing && root.active-visible: Rectangle {
+                x: root.active-x;
+                y: root.active-y;
+                width: max(root.active-w, Metrics.col-width);
+                height: root.active-h;
+                background: Palette.canvas;
+                border-width: 2px;
+                border-color: Palette.accent;
+
+                TextInput {
+                    x: 3px;
+                    width: parent.width - 6px;
+                    height: 100%;
+                    text: root.edit-text;
+                    font-size: Metrics.font-size;
+                    font-family: Metrics.font-family;
+                    color: Palette.text-primary;
+                    vertical-alignment: center;
+                    single-line: true;
+                    // Created the moment editing starts, which is exactly when
+                    // it should take the keyboard.
+                    init => { self.focus(); }
+                    edited => { root.edit-changed(self.text); }
+                    accepted => { root.edit-committed(); }
+                }
+            }
+        }
+
+        // One area over the whole viewport handles selection. A touch area per
+        // cell would be rebuilt on every scroll.
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.pointer-down(self.mouse-x, self.mouse-y, root.shift-held);
+                }
+            }
+            moved => {
+                if (self.pressed) {
+                    root.pointer-move(self.mouse-x, self.mouse-y);
+                }
+            }
+            scroll-event(event) => {
+                root.scrolled(event.delta-x, event.delta-y);
+                accept
+            }
+        }
+    }
+
+    // Horizontal scrollbar.
+    Rectangle {
+        x: Metrics.row-header-width;
+        y: parent.height - Metrics.scrollbar;
+        width: parent.width - Metrics.row-header-width - Metrics.scrollbar;
+        height: Metrics.scrollbar;
+        background: Palette.chrome;
+
+        Rectangle {
+            x: parent.width * root.h-thumb-start;
+            y: 2px;
+            width: max(24px, parent.width * root.h-thumb-size);
+            height: parent.height - 4px;
+            border-radius: 4px;
+            background: Palette.border-strong;
+        }
+        TouchArea {
+            moved => {
+                if (self.pressed) {
+                    root.scroll-to-fraction(true, self.mouse-x / self.width);
+                }
+            }
+            clicked => { root.scroll-to-fraction(true, self.mouse-x / self.width); }
+        }
+    }
+
+    // Vertical scrollbar.
+    Rectangle {
+        x: parent.width - Metrics.scrollbar;
+        y: Metrics.col-header-height;
+        width: Metrics.scrollbar;
+        height: parent.height - Metrics.col-header-height - Metrics.scrollbar;
+        background: Palette.chrome;
+
+        Rectangle {
+            x: 2px;
+            y: parent.height * root.v-thumb-start;
+            width: parent.width - 4px;
+            height: max(24px, parent.height * root.v-thumb-size);
+            border-radius: 4px;
+            background: Palette.border-strong;
+        }
+        TouchArea {
+            moved => {
+                if (self.pressed) {
+                    root.scroll-to-fraction(false, self.mouse-y / self.height);
+                }
+            }
+            clicked => { root.scroll-to-fraction(false, self.mouse-y / self.height); }
+        }
+    }
+}

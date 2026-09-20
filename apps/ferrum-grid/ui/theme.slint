@@ -1,0 +1,68 @@
+// Colour and geometry, both supplied by Rust at startup.
+//
+// The values here are only what the previewer shows before Rust connects.
+// `ferrum-theme` is the source of truth, and it holds the contrast test that
+// keeps the palette legible, so nothing should be tuned in this file.
+
+export global Palette {
+    in-out property <color> canvas: #ffffff;
+    in-out property <color> surface: #faf8f7;
+    in-out property <color> chrome: #f4f1f0;
+    in-out property <color> header: #ebe7e5;
+    in-out property <color> elevated: #ffffff;
+    in-out property <color> selection: #ece1f7;
+
+    in-out property <color> text-primary: #1c1a19;
+    in-out property <color> text-secondary: #494442;
+    in-out property <color> text-muted: #5e5855;
+    in-out property <color> danger: #c01c30;
+
+    in-out property <color> accent: #7c34a8;
+    in-out property <color> brand: #a24d1f;
+    in-out property <color> focus-ring: #7c34a8;
+    in-out property <color> border-strong: #8a817d;
+
+    in-out property <color> gridline: #e0e0e0;
+    in-out property <color> divider: #d4cecb;
+}
+
+// Everything dimensional. Identical in both themes by design, so switching
+// theme never moves a cell boundary.
+export global Metrics {
+    // Filled from the measured defaults: 48pt columns and 14.5pt rows.
+    in-out property <length> row-height: 19px;
+    in-out property <length> col-width: 64px;
+    in-out property <length> row-header-width: 44px;
+    in-out property <length> col-header-height: 21px;
+    in-out property <length> font-size: 14px;
+    in-out property <string> font-family: "";
+
+    // Chrome that is not part of the grid.
+    out property <length> toolbar-height: 40px;
+    out property <length> formula-bar-height: 30px;
+    out property <length> tab-bar-height: 30px;
+    out property <length> status-bar-height: 24px;
+    out property <length> scrollbar: 12px;
+}
+
+// One visible cell. Positions are relative to the top-left of the visible
+// window, so scrolling within a row does not rebuild the model.
+export struct CellBox {
+    row: int,
+    col: int,
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    text: string,
+    align-right: bool,
+    is-error: bool,
+}
+
+// One row number or column letter.
+export struct HeaderBox {
+    index: int,
+    pos: length,
+    size: length,
+    label: string,
+}
