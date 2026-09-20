@@ -1,24 +1,26 @@
 //! FerrumGrid.
 //!
-//! The window is a view over [`state::App`], which holds the workbook and
-//! everything about what is on screen. Every interaction mutates that state
-//! and then redraws from it, so there is one description of what is showing
-//! rather than two that can drift apart.
+//! The window is a view over [`ferrum_grid_view::App`], which holds the
+//! workbook and everything about what is on screen. Every interaction calls
+//! one method on it and then redraws from the [`View`] it produces, so there
+//! is one description of what is showing rather than two that can drift
+//! apart.
+//!
+//! Nothing is decided here. This file is the wiring between the interface's
+//! callbacks and the application's gestures, which is why the test harness
+//! can drive the same gestures without a window.
 
 // A spreadsheet is a window, not a console program.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod state;
-
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ferrum_core::{CellAddr, CellRef, SheetId, column_label};
+use ferrum_core::{A1Ref, CellAddr, SheetId};
+use ferrum_grid_view::{App, View};
 use ferrum_theme::metrics::{DEFAULT_FONT_SIZE_PT, FONT_STACK};
 use ferrum_theme::palette::Rgb;
-use slint::{ModelRc, SharedString, VecModel};
-
-use state::{App, Key};
+use slint::{ModelRc, VecModel};
 
 slint::include_modules!();
 
@@ -72,19 +74,11 @@ fn connect(window: &MainWindow, app: &Rc<RefCell<App>>) {
     });
 
     on!(on_pointer_down, |state, x, y, extend| {
-        if state.is_resizing() {
-            state.end_resize();
-        }
-        if state.is_editing() {
-            state.commit_edit();
-        }
-        let cell = state.cell_at(x, y);
-        state.select(cell, extend);
+        state.pointer_down(x, y, extend);
     });
 
     on!(on_pointer_move, |state, x, y| {
-        let cell = state.cell_at(x, y);
-        state.extend_to(cell);
+        state.pointer_move(x, y);
     });
 
     on!(on_select_all, |state| {
@@ -100,10 +94,7 @@ fn connect(window: &MainWindow, app: &Rc<RefCell<App>>) {
     });
 
     on!(on_formula_edited, |state, text| {
-        if !state.is_editing() {
-            state.begin_edit(Some(String::new()));
-        }
-        state.set_edit_text(text.to_string());
+        state.formula_edited(text.to_string());
     });
 
     on!(on_formula_committed, |state| {
@@ -119,18 +110,11 @@ fn connect(window: &MainWindow, app: &Rc<RefCell<App>>) {
     });
 
     on!(on_add_sheet, |state| {
-        let name = next_sheet_name(&state.book);
-        if let Ok(id) = state.book.add_sheet(&name) {
-            state.sheet = id;
-            state.select(CellRef::new(0, 0), false);
-        }
+        state.add_sheet();
     });
 
     on!(on_tab_selected, |state, index| {
-        if let Some(id) = state.book.sheet_order().get(index.max(0) as usize).copied() {
-            state.sheet = id;
-            state.select(CellRef::new(0, 0), false);
-        }
+        state.select_tab(index);
     });
 
     on!(on_column_header_pressed, |state, x| {
@@ -199,10 +183,7 @@ fn connect(window: &MainWindow, app: &Rc<RefCell<App>>) {
         let weak = window.as_weak();
         let held = Rc::clone(app);
         window.on_key_pressed(move |name, ctrl, shift| {
-            let Some(key) = key_from(name.as_str()) else {
-                return false;
-            };
-            let used = held.borrow_mut().handle_key(key, ctrl, shift);
+            let used = held.borrow_mut().key_pressed(name.as_str(), ctrl, shift);
             if let Some(window) = weak.upgrade() {
                 refresh(&window, &held.borrow());
             }
@@ -211,34 +192,7 @@ fn connect(window: &MainWindow, app: &Rc<RefCell<App>>) {
     }
 }
 
-/// Map a key name from the interface onto something the state understands.
-fn key_from(name: &str) -> Option<Key> {
-    Some(match name {
-        "up" => Key::Up,
-        "down" => Key::Down,
-        "left" => Key::Left,
-        "right" => Key::Right,
-        "pageup" => Key::PageUp,
-        "pagedown" => Key::PageDown,
-        "home" => Key::Home,
-        "end" => Key::End,
-        "enter" => Key::Enter,
-        "tab" => Key::Tab,
-        "escape" => Key::Escape,
-        "delete" => Key::Delete,
-        "backspace" => Key::Backspace,
-        "edit" => Key::Edit,
-        // Anything else is a keystroke only if it is something a person typed.
-        typed => {
-            if typed.is_empty() || typed.chars().any(char::is_control) {
-                return None;
-            }
-            Key::Typed(typed.to_string())
-        }
-    })
-}
-
-/// Push the palette and the metrics into the interface.
+/// Push the palette and the type into the interface.
 fn apply_theme(window: &MainWindow, app: &App) {
     fn colour(c: Rgb) -> slint::Color {
         slint::Color::from_rgb_u8(c.r, c.g, c.b)
@@ -263,164 +217,137 @@ fn apply_theme(window: &MainWindow, app: &App) {
     target.set_gridline(colour(palette.gridline));
     target.set_divider(colour(palette.divider));
 
-    let metrics = app.metrics();
     let geometry = window.global::<Metrics>();
-    // The row and column sizes belong to the sheet and are pushed by the
-    // redraw, which knows which rows are on screen.
-    geometry.set_col_header_height(metrics.column_header_height_px() as f32);
-    geometry.set_font_size(metrics.points_to_pixels(DEFAULT_FONT_SIZE_PT) as f32);
+    geometry.set_font_size(app.metrics().points_to_pixels(DEFAULT_FONT_SIZE_PT) as f32);
     // The first entry is what a spreadsheet uses when the machine has it.
     // Slint falls back on its own when it does not.
     geometry.set_font_family(FONT_STACK[0].into());
-
-    window.set_dark(app.theme == ferrum_theme::Theme::Dark);
 }
 
-/// Rebuild everything the window draws from the state.
+/// Copy the picture onto the window.
+///
+/// The view is taken apart field by field rather than with `..`, so adding
+/// something to the picture that nothing draws will not compile.
 fn refresh(window: &MainWindow, app: &App) {
-    let columns = app.visible_columns();
-    let rows = app.visible_rows();
+    let View {
+        columns,
+        rows,
+        cells,
+        offset_x,
+        offset_y,
+        selection,
+        active,
+        active_box,
+        horizontal_thumb,
+        vertical_thumb,
+        row_header_width,
+        column_header_height,
+        default_column_width,
+        default_row_height,
+        name_box,
+        formula_text,
+        status,
+        selection_summary,
+        editing,
+        edit_text,
+        can_undo,
+        undo_hint,
+        can_redo,
+        redo_hint,
+        tabs,
+        dark,
+    } = app.view();
 
-    let mut cells = Vec::with_capacity(columns.len() * rows.len());
-    for row in &rows {
-        for column in &columns {
-            let (text, align_right, is_error) =
-                app.cell_display(CellRef::new(row.index, column.index));
-            cells.push(CellBox {
-                row: row.index as i32,
-                col: column.index as i32,
-                x: column.pos,
-                y: row.pos,
-                w: column.size,
-                h: row.size,
-                text: text.into(),
-                align_right,
-                is_error,
-            });
-        }
-    }
-    window.set_cells(ModelRc::new(VecModel::from(cells)));
-
-    let column_headers: Vec<HeaderBox> = columns
-        .iter()
-        .map(|span| HeaderBox {
-            index: span.index as i32,
-            pos: span.pos,
-            size: span.size,
-            label: column_label(span.index).into(),
+    let boxes: Vec<CellBox> = cells
+        .into_iter()
+        .map(|cell| CellBox {
+            row: cell.at.row as i32,
+            col: cell.at.col as i32,
+            x: cell.rect.x,
+            y: cell.rect.y,
+            w: cell.rect.width,
+            h: cell.rect.height,
+            text: cell.text.into(),
+            align_right: cell.align_right,
+            is_error: cell.is_error,
         })
         .collect();
-    window.set_columns(ModelRc::new(VecModel::from(column_headers)));
+    window.set_cells(ModelRc::new(VecModel::from(boxes)));
 
-    let row_headers: Vec<HeaderBox> = rows
-        .iter()
-        .map(|span| HeaderBox {
-            index: span.index as i32,
-            pos: span.pos,
-            size: span.size,
-            label: (span.index + 1).to_string().into(),
-        })
-        .collect();
-    window.set_rows(ModelRc::new(VecModel::from(row_headers)));
+    window.set_columns(ModelRc::new(VecModel::from(headers(columns))));
+    window.set_rows(ModelRc::new(VecModel::from(headers(rows))));
+    window.set_offset_x(offset_x);
+    window.set_offset_y(offset_y);
 
-    window.set_offset_x(app.offset_x());
-    window.set_offset_y(app.offset_y());
-
-    let selection = app.selection();
     window.set_sel_top(selection.start.row as i32);
     window.set_sel_left(selection.start.col as i32);
     window.set_sel_bottom(selection.end.row as i32);
     window.set_sel_right(selection.end.col as i32);
 
-    let active = app.active();
     window.set_active_row(active.row as i32);
     window.set_active_col(active.col as i32);
-    match app.active_box() {
-        Some((x, y, w, h)) => {
+    match active_box {
+        Some(rect) => {
             window.set_active_visible(true);
-            window.set_active_x(x);
-            window.set_active_y(y);
-            window.set_active_w(w);
-            window.set_active_h(h);
+            window.set_active_x(rect.x);
+            window.set_active_y(rect.y);
+            window.set_active_w(rect.width);
+            window.set_active_h(rect.height);
         }
         None => window.set_active_visible(false),
     }
 
-    let (h_start, h_size) = app.thumb(true);
-    let (v_start, v_size) = app.thumb(false);
-    window.set_h_thumb_start(h_start);
-    window.set_h_thumb_size(h_size);
-    window.set_v_thumb_start(v_start);
-    window.set_v_thumb_size(v_size);
+    window.set_h_thumb_start(horizontal_thumb.start);
+    window.set_h_thumb_size(horizontal_thumb.size);
+    window.set_v_thumb_start(vertical_thumb.start);
+    window.set_v_thumb_size(vertical_thumb.size);
 
-    // The row gutter widens with the largest row number on screen, so the
-    // digits never clip and the grid does not shift on every scroll.
-    let widest_row = rows.last().map_or(1, |span| span.index + 1);
-    window
-        .global::<Metrics>()
-        .set_row_header_width(app.metrics().row_header_width_px(widest_row) as f32);
-    window
-        .global::<Metrics>()
-        .set_col_width(app.default_col_width_px());
-    window
-        .global::<Metrics>()
-        .set_row_height(app.default_row_height_px());
+    let geometry = window.global::<Metrics>();
+    geometry.set_row_header_width(row_header_width);
+    geometry.set_col_header_height(column_header_height);
+    geometry.set_col_width(default_column_width);
+    geometry.set_row_height(default_row_height);
 
-    window.set_can_undo(app.book.can_undo());
-    window.set_can_redo(app.book.can_redo());
-    window.set_undo_hint(
-        app.book
-            .undo_label()
-            .map_or_else(String::new, |what| format!("Undo {what}"))
-            .into(),
-    );
-    window.set_redo_hint(
-        app.book
-            .redo_label()
-            .map_or_else(String::new, |what| format!("Redo {what}"))
-            .into(),
-    );
+    window.set_can_undo(can_undo);
+    window.set_can_redo(can_redo);
+    window.set_undo_hint(undo_hint.into());
+    window.set_redo_hint(redo_hint.into());
 
-    window.set_name_box(app.name_box().into());
-    window.set_status_text(app.status().into());
-    window.set_selection_summary(app.selection_summary().into());
-    window.set_editing(app.is_editing());
-    window.set_edit_text(app.edit_text().into());
-    // While editing, the formula bar shows what is being typed.
-    window.set_formula_text(if app.is_editing() {
-        app.edit_text().into()
-    } else {
-        SharedString::from(app.formula_text())
-    });
+    window.set_name_box(name_box.into());
+    window.set_status_text(status.into());
+    window.set_selection_summary(selection_summary.into());
+    window.set_editing(editing);
+    window.set_edit_text(edit_text.into());
+    window.set_formula_text(formula_text.into());
 
-    let tabs: Vec<SheetTab> = app
-        .book
-        .sheet_order()
-        .iter()
-        .filter_map(|id| app.book.sheet(*id).map(|sheet| (*id, sheet)))
-        .map(|(id, sheet)| SheetTab {
-            name: sheet.name().into(),
-            active: id == app.sheet,
-        })
-        .collect();
-    window.set_tabs(ModelRc::new(VecModel::from(tabs)));
+    window.set_tabs(ModelRc::new(VecModel::from(
+        tabs.into_iter()
+            .map(|tab| SheetTab {
+                name: tab.name.into(),
+                active: tab.active,
+            })
+            .collect::<Vec<_>>(),
+    )));
+
+    window.set_dark(dark);
 }
 
-fn next_sheet_name(book: &ferrum_sheet::Workbook) -> String {
-    for n in 1..1000 {
-        let candidate = format!("Sheet{n}");
-        if book.sheet_id(&candidate).is_none() {
-            return candidate;
-        }
-    }
-    "Sheet".to_string()
+fn headers(from: Vec<ferrum_grid_view::Header>) -> Vec<HeaderBox> {
+    from.into_iter()
+        .map(|header| HeaderBox {
+            index: header.index as i32,
+            pos: header.pos,
+            size: header.size,
+            label: header.label.into(),
+        })
+        .collect()
 }
 
 /// A small table, so `--demo` opens on something to look at.
 fn seed_demo(app: &mut App) {
     let sheet: SheetId = app.sheet;
     let write = |app: &mut App, spot: &str, text: &str| {
-        let cell = ferrum_core::A1Ref::parse(spot)
+        let cell = A1Ref::parse(spot)
             .expect("the demo uses real addresses")
             .cell;
         app.book.set_input(CellAddr::new(sheet, cell), text);

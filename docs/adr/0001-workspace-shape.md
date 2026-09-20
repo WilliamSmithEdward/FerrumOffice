@@ -39,6 +39,11 @@ Crates are added when a boundary is real, not in advance. The xlsx reader, the
 VBA engine, the code editor core and the Slint UI layer each get one when they
 are started.
 
+Two of those have since arrived: `ferrum-xlsx` for the file format, and
+`ferrum-grid-view` for the interaction layer, which is the "Slint UI layer"
+boundary turned inside out. See
+[ADR 0003](0003-drive-the-application-through-a-harness.md).
+
 The dependency direction is strictly downward: `core` knows nothing, `calc`
 knows `core`, `sheet` knows `core` and `calc`, and the application knows all of
 them.

@@ -7,11 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# This crate is the window and nothing else. What it is showing, and what a
+# gesture does to it, live in ferrum-grid-view, which has no interface
+# toolkit and can therefore be driven by a test.
 [dependencies]
 ferrum-core.workspace = true
 ferrum-theme.workspace = true
-ferrum-calc.workspace = true
-ferrum-sheet.workspace = true
+ferrum-grid-view.workspace = true
 # The one third-party dependency the product carries, and only because
 # AGENTS.md names it as the interface technology. See
 # docs/adr/0002-no-runtime-dependencies.md.

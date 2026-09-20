@@ -20,6 +20,10 @@ jobs:
   # The library crates have no dependencies at all, so this finishes in under
   # a minute and is where almost every mistake is caught. It runs on Linux
   # because nothing in it is platform-specific.
+  #
+  # ferrum-grid-view is in here rather than with the application: it is the
+  # whole of what FerrumGrid shows and does, minus the toolkit, so the
+  # integration tests that drive the grid run in seconds on every push.
   engine:
     name: Engine
     runs-on: ubuntu-latest
@@ -33,11 +37,13 @@ jobs:
         run: >
           cargo test
           -p ferrum-core -p ferrum-theme -p ferrum-calc -p ferrum-sheet
+          -p ferrum-xlsx -p ferrum-grid-view
 
       - name: Clippy
         run: >
           cargo clippy --all-targets
           -p ferrum-core -p ferrum-theme -p ferrum-calc -p ferrum-sheet
+          -p ferrum-xlsx -p ferrum-grid-view
 
   # The application pulls in the GUI toolkit, which is most of the build time.
   # Windows because that is what it targets, and because the hosted runner

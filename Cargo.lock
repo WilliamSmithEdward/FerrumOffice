@@ -1011,12 +1011,20 @@ version = "0.1.0"
 name = "ferrum-grid"
 version = "0.1.0"
 dependencies = [
- "ferrum-calc",
  "ferrum-core",
- "ferrum-sheet",
+ "ferrum-grid-view",
  "ferrum-theme",
  "slint",
  "slint-build",
+]
+
+[[package]]
+name = "ferrum-grid-view"
+version = "0.1.0"
+dependencies = [
+ "ferrum-core",
+ "ferrum-sheet",
+ "ferrum-theme",
 ]
 
 [[package]]

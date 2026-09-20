@@ -1,0 +1,20 @@
+[package]
+name = "ferrum-grid-view"
+description = "What FerrumGrid is showing, and what a gesture does to it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No interface toolkit here, deliberately. Everything in this crate is plain
+# data and plain functions, which is what lets the test harness drive the
+# whole application without a window. See
+# docs/adr/0003-drive-the-application-through-a-harness.md.
+[dependencies]
+ferrum-core.workspace = true
+ferrum-theme.workspace = true
+ferrum-sheet.workspace = true
+
+[lints]
+workspace = true

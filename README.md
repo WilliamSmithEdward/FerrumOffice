@@ -11,10 +11,11 @@ A productivity suite written from scratch in Rust, with a Slint interface.
 
 > **Status: early, and it opens.** FerrumGrid runs: a virtualised grid over a
 > million rows, resizable rows and columns, selection, in-cell and formula-bar
-> editing, sheet tabs, both themes. Behind it, a formula engine with 96
-> callable function names, sparse storage, a dependency graph, and ordered
-> recalculation with cycle detection. 272 tests. No file format yet, so
-> nothing can be saved or opened.
+> editing, undo and redo, sheet tabs, both themes. Behind it, a formula engine
+> with 96 callable function names, sparse storage, a dependency graph, and
+> ordered recalculation with cycle detection. It can write an `.xlsx` that
+> Excel opens, but not read one back yet, and the application has no Save.
+> 376 tests.
 
 ## What it is aiming at
 
@@ -23,7 +24,7 @@ language people already use, on an interface built to a higher bar than the
 products it replaces, with performance treated as a requirement rather than an
 aspiration.
 
-Two decisions shape everything else:
+Three decisions shape everything else:
 
 **No third-party dependencies in the shipped product.** The standard library
 and the GUI toolkit, and nothing else. The ZIP codec, the XML reader, the date
@@ -36,6 +37,14 @@ because that surface was measured, not remembered: `#ffffff` cells, `#e0e0e0`
 gridlines, 48pt columns and 14.5pt rows in Aptos Narrow 11pt. The method and
 the numbers are in [docs/design/theme.md](docs/design/theme.md), including a
 figure that was wrong in the first draft and how the measurement caught it.
+The goal those measurements serve, and how close is close enough, is in
+[docs/design/fidelity.md](docs/design/fidelity.md).
+
+**Drive the application, do not poke at it.** Everything FerrumGrid shows and
+does lives in `ferrum-grid-view`, which has no toolkit in it; the window is
+wiring. Tests click where a cell is drawn, press the keys the interface sends,
+and read back what would be on screen. See
+[ADR 0003](docs/adr/0003-drive-the-application-through-a-harness.md).
 
 ## Layout
 
@@ -45,8 +54,11 @@ crates/
   ferrum-theme    colour tokens and grid metrics.
   ferrum-calc     formula lexer, parser, evaluator, function library.
   ferrum-sheet    workbook model, sparse storage, dependency-driven recalc.
+  ferrum-xlsx     the ZIP container, the XML, and the spreadsheet package.
+  ferrum-grid-view  what FerrumGrid shows, what a gesture does to it, and
+                  the harness that drives it without a window.
 apps/
-  ferrum-grid     the spreadsheet application.
+  ferrum-grid     the window. Wiring, and nothing else.
 assets/
   ferrum_grid.png        the FerrumGrid mark, as drawn.
   ferrum_office_icon.png the suite mark.
@@ -92,6 +104,14 @@ cargo test
 cargo clippy --all-targets
 ```
 
+The whole of FerrumGrid's behaviour is testable without a window, so the loop
+worth staying inside is the one that does not build the toolkit at all, and
+finishes in about a second:
+
+```bash
+cargo test -p ferrum-grid-view
+```
+
 A rough timing of the calculation engine, with the numbers recorded in
 [open-questions.md](docs/open-questions.md):
 
@@ -101,9 +121,17 @@ cargo run --release -p ferrum-sheet --example workload
 
 ## Design
 
+- [How close to Excel, and how we know](docs/design/fidelity.md)
 - [Theme: colour, type and pixel alignment](docs/design/theme.md)
+- [The spreadsheet file format](docs/design/file-format.md)
 - [The Ferrum code editor](docs/design/code-editor.md)
 - [Open questions](docs/open-questions.md)
+
+## Decisions
+
+- [ADR 0001: Workspace shape](docs/adr/0001-workspace-shape.md)
+- [ADR 0002: No third-party dependencies in the shipped product](docs/adr/0002-no-runtime-dependencies.md)
+- [ADR 0003: Drive the application through a harness](docs/adr/0003-drive-the-application-through-a-harness.md)
 
 ## Licence
 

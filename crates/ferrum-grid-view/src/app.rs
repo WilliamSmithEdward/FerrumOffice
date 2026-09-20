@@ -1,4 +1,9 @@
-//! What the window is showing, and how it turns into something to draw.
+//! The state behind the window, and every gesture that changes it.
+//!
+//! One method here per thing a person can do: press a key, press the pointer,
+//! drag a header edge, scroll, undo. The interface calls exactly these, and so
+//! does [`Harness`](crate::Harness). What comes back out is
+//! [`View`](crate::View).
 //!
 //! Two unit systems meet here and the split is deliberate.
 //!
@@ -41,6 +46,51 @@ pub enum Key {
     Edit,
     /// A printable character that starts an edit.
     Typed(String),
+}
+
+/// Map a key name from the interface onto something the state understands.
+///
+/// The names are the interface's own, so a test that presses a key travels
+/// the same path a keystroke does. `None` means the key is not ours and
+/// should fall through to whatever else wants it.
+pub fn key_from(name: &str) -> Option<Key> {
+    Some(match name {
+        "up" => Key::Up,
+        "down" => Key::Down,
+        "left" => Key::Left,
+        "right" => Key::Right,
+        "pageup" => Key::PageUp,
+        "pagedown" => Key::PageDown,
+        "home" => Key::Home,
+        "end" => Key::End,
+        "enter" => Key::Enter,
+        "tab" => Key::Tab,
+        "escape" => Key::Escape,
+        "delete" => Key::Delete,
+        "backspace" => Key::Backspace,
+        "edit" => Key::Edit,
+        // Anything else is a keystroke only if it is something a person typed.
+        typed => {
+            if typed.is_empty() || !typed.chars().all(is_text) {
+                return None;
+            }
+            Key::Typed(typed.to_string())
+        }
+    })
+}
+
+/// Whether a character is one a person meant to type.
+///
+/// Control characters are the modifier keys, which arrive on their own. The
+/// private use area is where a special key the interface has no name for ends
+/// up: F9 arrives as `U+F70C`. Neither is text, and treating either as text
+/// opens a cell editor holding something invisible.
+fn is_text(c: char) -> bool {
+    !c.is_control()
+        && !matches!(c,
+            '\u{E000}'..='\u{F8FF}'
+            | '\u{F0000}'..='\u{FFFFD}'
+            | '\u{100000}'..='\u{10FFFD}')
 }
 
 /// One visible row or column, positioned in whole pixels relative to the
@@ -319,6 +369,30 @@ impl App {
         )
     }
 
+    /// A press inside the cell area.
+    ///
+    /// A press elsewhere ends whatever the previous one started: a resize
+    /// that was still in progress, an edit that was still open. Committing
+    /// rather than abandoning the edit is what a spreadsheet does, and losing
+    /// what somebody typed because they clicked away would be the worse
+    /// surprise.
+    pub fn pointer_down(&mut self, x: f32, y: f32, extend: bool) {
+        if self.is_resizing() {
+            self.end_resize();
+        }
+        if self.is_editing() {
+            self.commit_edit();
+        }
+        let cell = self.cell_at(x, y);
+        self.select(cell, extend);
+    }
+
+    /// The pointer moving with the button held, which sweeps a selection.
+    pub fn pointer_move(&mut self, x: f32, y: f32) {
+        let cell = self.cell_at(x, y);
+        self.extend_to(cell);
+    }
+
     /// Scroll the smallest amount that brings a cell fully into view.
     pub fn scroll_into_view(&mut self, cell: CellRef) {
         let (width_pt, height_pt) = self.viewport_pt();
@@ -514,6 +588,19 @@ impl App {
         }
     }
 
+    /// Typing in the formula bar, which opens an edit if one is not already
+    /// open.
+    ///
+    /// The bar replaces the cell rather than amending it, because that is
+    /// what its own text field has already done on screen by the time this
+    /// arrives.
+    pub fn formula_edited(&mut self, text: String) {
+        if !self.is_editing() {
+            self.begin_edit(Some(String::new()));
+        }
+        self.set_edit_text(text);
+    }
+
     /// Open the active cell for editing.
     ///
     /// `replace` is what a printable keystroke passes: typing over a cell
@@ -604,6 +691,17 @@ impl App {
     }
 
     // Keyboard.
+
+    /// A key arriving from the interface, by name.
+    ///
+    /// Returns whether it was used, which is what tells the interface to stop
+    /// passing it on.
+    pub fn key_pressed(&mut self, name: &str, ctrl: bool, shift: bool) -> bool {
+        match key_from(name) {
+            Some(key) => self.handle_key(key, ctrl, shift),
+            None => false,
+        }
+    }
 
     /// Returns true when the key was used.
     pub fn handle_key(&mut self, key: Key, ctrl: bool, shift: bool) -> bool {
@@ -713,6 +811,39 @@ impl App {
             (0, 1) => CellRef::new(from.row, bounds.end.col.max(from.col)),
             _ => from,
         }
+    }
+
+    // Sheets.
+
+    /// Add a sheet and go to it.
+    pub fn add_sheet(&mut self) {
+        let name = self.next_sheet_name();
+        if let Ok(id) = self.book.add_sheet(&name) {
+            self.show_sheet(id);
+        }
+    }
+
+    /// Go to the sheet whose tab was clicked. Out of range does nothing.
+    pub fn select_tab(&mut self, index: i32) {
+        if let Some(id) = self.book.sheet_order().get(index.max(0) as usize).copied() {
+            self.show_sheet(id);
+        }
+    }
+
+    /// The first unused default name.
+    fn next_sheet_name(&self) -> String {
+        for n in 1..1000 {
+            let candidate = format!("Sheet{n}");
+            if self.book.sheet_id(&candidate).is_none() {
+                return candidate;
+            }
+        }
+        "Sheet".to_string()
+    }
+
+    fn show_sheet(&mut self, id: SheetId) {
+        self.sheet = id;
+        self.select(CellRef::new(0, 0), false);
     }
 
     // What the chrome shows.
@@ -1176,6 +1307,30 @@ mod tests {
         app.handle_key(Key::Typed("7".to_string()), false, false);
         assert!(app.is_editing());
         assert_eq!(app.edit_text(), "7");
+    }
+
+    #[test]
+    fn a_function_key_the_interface_does_not_name_is_not_typing() {
+        // F9 arrives as U+F70C, a private use character. It is not control,
+        // so a test for control characters alone lets it through and opens an
+        // editor holding something invisible.
+        let mut app = app();
+        assert!(!app.key_pressed("\u{F70C}", false, false));
+        assert!(!app.is_editing());
+    }
+
+    #[test]
+    fn a_modifier_on_its_own_is_not_typing() {
+        let mut app = app();
+        assert!(!app.key_pressed("\u{0011}", false, false));
+        assert!(!app.is_editing());
+    }
+
+    #[test]
+    fn an_ordinary_character_still_types() {
+        let mut app = app();
+        assert!(app.key_pressed("é", false, false));
+        assert_eq!(app.edit_text(), "é");
     }
 
     #[test]
