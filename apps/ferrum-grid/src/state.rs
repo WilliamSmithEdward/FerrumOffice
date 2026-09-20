@@ -413,11 +413,14 @@ impl App {
     pub fn begin_column_resize(&mut self, index: u32) {
         let from = self.columns().size_of(index);
         self.drag = Drag::Column { index, from };
+        // The whole drag is one gesture, so one undo takes it all back.
+        self.book.begin_change("resize column");
     }
 
     pub fn begin_row_resize(&mut self, index: u32) {
         let from = self.rows().size_of(index);
         self.drag = Drag::Row { index, from };
+        self.book.begin_change("resize row");
     }
 
     /// Continue a resize. `delta` is the whole distance dragged so far, in
@@ -432,17 +435,19 @@ impl App {
             Drag::Column { index, from } => (index, snap_to_hidden(from + change), true),
             Drag::Row { index, from } => (index, snap_to_hidden(from + change), false),
         };
-        if let Some(sheet) = self.book.sheet_mut(self.sheet) {
-            if is_column {
-                sheet.columns_mut().set_size(index, Some(size));
-            } else {
-                sheet.rows_mut().set_size(index, Some(size));
-            }
+        let sheet = self.sheet;
+        if is_column {
+            self.book.resize_column(sheet, index, Some(size));
+        } else {
+            self.book.resize_row(sheet, index, Some(size));
         }
         self.clamp_scroll();
     }
 
     pub fn end_resize(&mut self) {
+        if self.drag != Drag::None {
+            self.book.end_change();
+        }
         self.drag = Drag::None;
     }
 
@@ -543,9 +548,46 @@ impl App {
     /// Empty every cell in the selection.
     pub fn clear_selection(&mut self) {
         let cells: Vec<CellRef> = self.clipped_selection().cells().collect();
+        self.book.begin_change("clear");
         for cell in cells {
             self.book.clear(CellAddr::new(self.sheet, cell));
         }
+        self.book.end_change();
+    }
+
+    /// Take back the last gesture, and go to where it happened.
+    ///
+    /// Moving the selection is what makes an undo legible: an undo whose
+    /// effect is off screen looks like nothing happened.
+    pub fn undo(&mut self) {
+        let Some(report) = self.book.undo() else {
+            self.status = "Nothing to undo".to_string();
+            return;
+        };
+        self.status.clear();
+        self.go_to_change(&report);
+    }
+
+    pub fn redo(&mut self) {
+        let Some(report) = self.book.redo() else {
+            self.status = "Nothing to redo".to_string();
+            return;
+        };
+        self.status.clear();
+        self.go_to_change(&report);
+    }
+
+    fn go_to_change(&mut self, report: &ferrum_sheet::RecalcReport) {
+        let Some(first) = report
+            .changed
+            .iter()
+            .find(|addr| addr.sheet == self.sheet)
+            .or(report.changed.first())
+        else {
+            return;
+        };
+        self.sheet = first.sheet;
+        self.select(first.cell, false);
     }
 
     /// The selection, narrowed to the cells the sheet actually holds.
@@ -567,6 +609,24 @@ impl App {
     pub fn handle_key(&mut self, key: Key, ctrl: bool, shift: bool) -> bool {
         if self.is_editing() {
             return self.handle_key_while_editing(key);
+        }
+
+        if ctrl && let Key::Typed(text) = &key {
+            match text.to_ascii_lowercase().as_str() {
+                "z" if shift => {
+                    self.redo();
+                    return true;
+                }
+                "z" => {
+                    self.undo();
+                    return true;
+                }
+                "y" => {
+                    self.redo();
+                    return true;
+                }
+                _ => {}
+            }
         }
 
         let page = self.visible_rows().len().saturating_sub(2).max(1) as i64;
@@ -888,6 +948,101 @@ mod tests {
         app.begin_row_resize(4);
         app.drag_resize(app.to_px(12.0) as f32);
         assert!((app.rows().size_of(4) - (original + 12.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn control_z_takes_back_a_typed_entry() {
+        let mut app = app();
+        app.handle_key(Key::Typed("7".to_string()), false, false);
+        app.handle_key(Key::Enter, false, false);
+        assert_eq!(
+            app.book.value(CellAddr::new(app.sheet, CellRef::new(0, 0))),
+            Value::Number(7.0)
+        );
+
+        app.handle_key(Key::Typed("z".to_string()), true, false);
+        assert_eq!(
+            app.book.value(CellAddr::new(app.sheet, CellRef::new(0, 0))),
+            Value::Blank
+        );
+
+        app.handle_key(Key::Typed("y".to_string()), true, false);
+        assert_eq!(
+            app.book.value(CellAddr::new(app.sheet, CellRef::new(0, 0))),
+            Value::Number(7.0)
+        );
+    }
+
+    #[test]
+    fn control_shift_z_redoes_as_well() {
+        let mut app = app();
+        app.handle_key(Key::Typed("5".to_string()), false, false);
+        app.handle_key(Key::Enter, false, false);
+        app.handle_key(Key::Typed("z".to_string()), true, false);
+        app.handle_key(Key::Typed("Z".to_string()), true, true);
+        assert_eq!(
+            app.book.value(CellAddr::new(app.sheet, CellRef::new(0, 0))),
+            Value::Number(5.0)
+        );
+    }
+
+    #[test]
+    fn undo_goes_to_where_the_change_was() {
+        let mut app = app();
+        app.select(CellRef::new(30, 4), false);
+        app.handle_key(Key::Typed("9".to_string()), false, false);
+        app.handle_key(Key::Enter, false, false);
+
+        app.select(CellRef::new(0, 0), false);
+        app.handle_key(Key::Typed("z".to_string()), true, false);
+        // The selection followed the undo, so its effect is on screen.
+        assert_eq!(app.active(), CellRef::new(30, 4));
+        assert!(app.active_box().is_some());
+    }
+
+    #[test]
+    fn clearing_a_block_is_one_undo_step() {
+        let mut app = app();
+        for row in 0..5 {
+            app.book
+                .set_input(CellAddr::new(app.sheet, CellRef::new(row, 0)), "1");
+        }
+        app.select(CellRef::new(0, 0), false);
+        app.select(CellRef::new(4, 0), true);
+        app.handle_key(Key::Delete, false, false);
+
+        app.handle_key(Key::Typed("z".to_string()), true, false);
+        for row in 0..5 {
+            assert_eq!(
+                app.book
+                    .value(CellAddr::new(app.sheet, CellRef::new(row, 0))),
+                Value::Number(1.0),
+                "row {row} should have come back with the rest"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resize_drag_is_one_undo_step() {
+        let mut app = app();
+        let original = app.columns().size_of(2);
+
+        app.begin_column_resize(2);
+        for step in 1..40 {
+            app.drag_resize(step as f32 * 2.0);
+        }
+        app.end_resize();
+        assert!(app.columns().size_of(2) > original);
+
+        app.handle_key(Key::Typed("z".to_string()), true, false);
+        assert!((app.columns().size_of(2) - original).abs() < 0.01);
+    }
+
+    #[test]
+    fn undo_with_nothing_to_undo_says_so_rather_than_doing_nothing_silently() {
+        let mut app = app();
+        app.handle_key(Key::Typed("z".to_string()), true, false);
+        assert!(app.status().contains("Nothing to undo"), "{}", app.status());
     }
 
     #[test]

@@ -10,6 +10,7 @@ use ferrum_core::{CellAddr, CellRef, RangeRef, SheetId, Value};
 
 use crate::cell::{Cell, Input, parse_input};
 use crate::graph::{DependencyGraph, dependencies_of};
+use crate::history::{Change, History};
 use crate::sheet::Sheet;
 
 /// What a recalculation did.
@@ -71,6 +72,7 @@ pub struct Workbook {
     order: Vec<SheetId>,
     names: HashMap<String, Operand>,
     graph: DependencyGraph,
+    history: History,
 }
 
 impl Default for Workbook {
@@ -87,6 +89,7 @@ impl Workbook {
             order: Vec::new(),
             names: HashMap::new(),
             graph: DependencyGraph::new(),
+            history: History::new(),
         };
         book.push_sheet(Sheet::new("Sheet1"));
         book
@@ -217,59 +220,170 @@ impl Workbook {
 
     /// Write what the author typed, then recalculate what depended on it.
     pub fn set_input(&mut self, addr: CellAddr, typed: &str) -> RecalcReport {
-        if typed.is_empty() {
-            return self.clear(addr);
-        }
+        let input = if typed.is_empty() {
+            None
+        } else {
+            Some(parse_input(typed))
+        };
+        self.replace_cell(addr, input)
+    }
+
+    /// Empty a cell and recalculate what read it.
+    pub fn clear(&mut self, addr: CellAddr) -> RecalcReport {
+        self.replace_cell(addr, None)
+    }
+
+    /// The one path by which a cell's content changes.
+    ///
+    /// Everything that edits a cell comes through here, which is what makes
+    /// the undo history complete rather than nearly complete.
+    fn replace_cell(&mut self, addr: CellAddr, input: Option<Input>) -> RecalcReport {
         if self.sheet(addr.sheet).is_none() {
             return RecalcReport::default();
         }
 
-        let previous = self.value(addr);
-        let input = parse_input(typed);
-
-        // Register what the new formula reads before anything is evaluated,
-        // so the ordering pass sees the new shape of the graph.
-        match &input {
-            Input::Formula { expr, .. } => {
-                let dependencies = self.dependencies_for(expr, addr.sheet);
-                self.graph.set_precedents(addr, dependencies);
-            }
-            Input::Literal(_) | Input::Malformed { .. } => self.graph.clear(addr),
-        }
-
-        let seed_value = match &input {
-            Input::Literal(value) => value.clone(),
-            // Until it is evaluated. A malformed formula stays this way.
-            Input::Formula { .. } => Value::Blank,
-            Input::Malformed { .. } => Value::Error(ferrum_core::CalcError::Name),
-        };
-
-        if let Some(sheet) = self.sheet_mut(addr.sheet) {
-            sheet.insert(
-                addr.cell,
-                Cell {
-                    input,
-                    value: seed_value,
-                },
-            );
-        }
+        let previous_value = self.value(addr);
+        let previous_input = self.cell(addr).map(|cell| cell.input.clone());
+        self.history
+            .record_cell(addr, previous_input, input.clone());
+        self.write_cell(addr, input);
 
         let mut report = self.recalculate_from(vec![addr]);
-        if self.value(addr) != previous {
+        if self.value(addr) != previous_value {
             report.note_changed(addr);
         }
         report
     }
 
-    /// Empty a cell and recalculate what read it.
-    pub fn clear(&mut self, addr: CellAddr) -> RecalcReport {
-        let previous = self.value(addr);
-        self.graph.clear(addr);
-        if let Some(sheet) = self.sheet_mut(addr.sheet) {
-            sheet.remove(addr.cell);
+    /// Put content in a cell and update the graph, recording nothing.
+    fn write_cell(&mut self, addr: CellAddr, input: Option<Input>) {
+        // Register what a new formula reads before anything is evaluated, so
+        // the ordering pass sees the new shape of the graph.
+        match &input {
+            Some(Input::Formula { expr, .. }) => {
+                let dependencies = self.dependencies_for(expr, addr.sheet);
+                self.graph.set_precedents(addr, dependencies);
+            }
+            _ => self.graph.clear(addr),
         }
-        let mut report = self.recalculate_from(vec![addr]);
-        if previous != Value::Blank {
+
+        let Some(sheet) = self.sheet_mut(addr.sheet) else {
+            return;
+        };
+        match input {
+            None => {
+                sheet.remove(addr.cell);
+            }
+            Some(input) => {
+                let value = match &input {
+                    Input::Literal(value) => value.clone(),
+                    // Until it is evaluated. A malformed formula stays so.
+                    Input::Formula { .. } => Value::Blank,
+                    Input::Malformed { .. } => Value::Error(ferrum_core::CalcError::Name),
+                };
+                sheet.insert(addr.cell, Cell { input, value });
+            }
+        }
+    }
+
+    // Sizes, which go through the workbook so that a resize can be undone.
+
+    /// Set a column width in points. `None` returns it to the default.
+    pub fn resize_column(&mut self, sheet: SheetId, index: u32, size: Option<f64>) {
+        self.resize(sheet, index, true, size);
+    }
+
+    /// Set a row height in points.
+    pub fn resize_row(&mut self, sheet: SheetId, index: u32, size: Option<f64>) {
+        self.resize(sheet, index, false, size);
+    }
+
+    fn resize(&mut self, sheet: SheetId, index: u32, is_column: bool, size: Option<f64>) {
+        let before = self.sheet(sheet).and_then(|s| {
+            let axis = if is_column { s.columns() } else { s.rows() };
+            axis.exceptions()
+                .find(|(at, _)| *at == index)
+                .map(|(_, size)| size)
+        });
+        if before == size {
+            return;
+        }
+        self.history
+            .record_size(sheet, index, is_column, before, size);
+        self.apply_size(sheet, index, is_column, size);
+    }
+
+    fn apply_size(&mut self, sheet: SheetId, index: u32, is_column: bool, size: Option<f64>) {
+        let Some(sheet) = self.sheet_mut(sheet) else {
+            return;
+        };
+        if is_column {
+            sheet.columns_mut().set_size(index, size);
+        } else {
+            sheet.rows_mut().set_size(index, size);
+        }
+    }
+
+    // Undo and redo.
+
+    /// Open a gesture. Every edit until [`Self::end_change`] is one undo step.
+    pub fn begin_change(&mut self, label: &str) {
+        self.history.begin(label);
+    }
+
+    pub fn end_change(&mut self) {
+        self.history.end();
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    pub fn undo_label(&self) -> Option<&str> {
+        self.history.undo_label()
+    }
+
+    pub fn redo_label(&self) -> Option<&str> {
+        self.history.redo_label()
+    }
+
+    /// Take back the last gesture.
+    pub fn undo(&mut self) -> Option<RecalcReport> {
+        let change = self.history.take_undo()?;
+        let report = self.replay(&change, false);
+        self.history.finish_undo(change);
+        Some(report)
+    }
+
+    /// Put back the last undone gesture.
+    pub fn redo(&mut self) -> Option<RecalcReport> {
+        let change = self.history.take_redo()?;
+        let report = self.replay(&change, true);
+        self.history.finish_redo(change);
+        Some(report)
+    }
+
+    /// Apply a gesture in one direction or the other.
+    fn replay(&mut self, change: &Change, forward: bool) -> RecalcReport {
+        let mut seeds = Vec::with_capacity(change.cells.len());
+        for edit in &change.cells {
+            let target = if forward { &edit.after } else { &edit.before };
+            self.write_cell(edit.addr, target.clone());
+            seeds.push(edit.addr);
+        }
+        for edit in &change.sizes {
+            let size = if forward { edit.after } else { edit.before };
+            self.apply_size(edit.sheet, edit.index, edit.is_column, size);
+        }
+
+        let mut report = self.recalculate_from(seeds.clone());
+        // The cells the gesture itself touched need repainting whether or not
+        // a formula recomputed.
+        for addr in seeds {
             report.note_changed(addr);
         }
         report

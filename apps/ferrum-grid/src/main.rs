@@ -110,8 +110,12 @@ fn connect(window: &MainWindow, app: &Rc<RefCell<App>>) {
         state.commit_edit();
     });
 
-    on!(on_toggle_theme, |state| {
-        state.toggle_theme();
+    on!(on_undo, |state| {
+        state.undo();
+    });
+
+    on!(on_redo, |state| {
+        state.redo();
     });
 
     on!(on_add_sheet, |state| {
@@ -361,6 +365,21 @@ fn refresh(window: &MainWindow, app: &App) {
     window
         .global::<Metrics>()
         .set_row_height(app.default_row_height_px());
+
+    window.set_can_undo(app.book.can_undo());
+    window.set_can_redo(app.book.can_redo());
+    window.set_undo_hint(
+        app.book
+            .undo_label()
+            .map_or_else(String::new, |what| format!("Undo {what}"))
+            .into(),
+    );
+    window.set_redo_hint(
+        app.book
+            .redo_label()
+            .map_or_else(String::new, |what| format!("Redo {what}"))
+            .into(),
+    );
 
     window.set_name_box(app.name_box().into());
     window.set_status_text(app.status().into());

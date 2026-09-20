@@ -437,3 +437,173 @@ fn a_formula_referring_to_itself_through_a_range_is_circular() {
     assert!(report.is_circular());
     assert!(report.circular.contains(&addr));
 }
+
+// Undo and redo.
+
+#[test]
+fn undo_takes_back_an_edit_and_redo_puts_it_again() {
+    let mut book = Workbook::new();
+    set(&mut book, "A1", "10");
+    set(&mut book, "A1", "20");
+    assert_eq!(number(&book, "A1"), 20.0);
+
+    book.undo().unwrap();
+    assert_eq!(number(&book, "A1"), 10.0);
+
+    book.redo().unwrap();
+    assert_eq!(number(&book, "A1"), 20.0);
+}
+
+#[test]
+fn undoing_the_first_edit_empties_the_cell_again() {
+    let mut book = Workbook::new();
+    set(&mut book, "A1", "10");
+    book.undo().unwrap();
+    assert_eq!(value(&book, "A1"), Value::Blank);
+}
+
+#[test]
+fn undo_recalculates_what_depended_on_the_change() {
+    let mut book = Workbook::new();
+    set(&mut book, "A1", "10");
+    set(&mut book, "B1", "=A1*2");
+    set(&mut book, "A1", "50");
+    assert_eq!(number(&book, "B1"), 100.0);
+
+    book.undo().unwrap();
+    assert_eq!(number(&book, "A1"), 10.0);
+    assert_eq!(
+        number(&book, "B1"),
+        20.0,
+        "the dependent should have followed"
+    );
+}
+
+#[test]
+fn undo_restores_a_formula_rather_than_its_result() {
+    let mut book = Workbook::new();
+    set(&mut book, "A1", "6");
+    set(&mut book, "B1", "=A1*7");
+    set(&mut book, "B1", "plain text");
+
+    book.undo().unwrap();
+    let b1 = a(&book, "B1");
+    assert_eq!(book.edit_text(b1), "=A1*7");
+    assert_eq!(number(&book, "B1"), 42.0);
+}
+
+#[test]
+fn a_bracketed_gesture_undoes_in_one_step() {
+    let mut book = Workbook::new();
+    book.begin_change("fill");
+    for row in 1..=20 {
+        set(&mut book, &format!("A{row}"), &row.to_string());
+    }
+    book.end_change();
+
+    assert_eq!(number(&book, "A20"), 20.0);
+    book.undo().unwrap();
+    for row in 1..=20 {
+        assert_eq!(
+            value(&book, &format!("A{row}")),
+            Value::Blank,
+            "row {row} should have gone back with the rest"
+        );
+    }
+    assert!(!book.can_undo(), "one gesture, one step");
+}
+
+#[test]
+fn a_resize_can_be_undone() {
+    let mut book = Workbook::new();
+    let sheet = book.first_sheet();
+    let original = book.sheet(sheet).unwrap().columns().size_of(2);
+
+    book.resize_column(sheet, 2, Some(150.0));
+    assert_eq!(book.sheet(sheet).unwrap().columns().size_of(2), 150.0);
+
+    book.undo().unwrap();
+    assert_eq!(book.sheet(sheet).unwrap().columns().size_of(2), original);
+
+    book.redo().unwrap();
+    assert_eq!(book.sheet(sheet).unwrap().columns().size_of(2), 150.0);
+}
+
+#[test]
+fn a_resize_drag_is_one_undo_step() {
+    let mut book = Workbook::new();
+    let sheet = book.first_sheet();
+    let original = book.sheet(sheet).unwrap().columns().size_of(1);
+
+    book.begin_change("resize column");
+    for width in 50..200 {
+        book.resize_column(sheet, 1, Some(f64::from(width)));
+    }
+    book.end_change();
+
+    book.undo().unwrap();
+    assert_eq!(book.sheet(sheet).unwrap().columns().size_of(1), original);
+    assert!(!book.can_undo());
+}
+
+#[test]
+fn undoing_past_the_beginning_is_refused_rather_than_wrong() {
+    let mut book = Workbook::new();
+    set(&mut book, "A1", "1");
+    assert!(book.undo().is_some());
+    assert!(book.undo().is_none());
+    assert_eq!(value(&book, "A1"), Value::Blank);
+}
+
+#[test]
+fn a_new_edit_after_an_undo_discards_the_redo() {
+    let mut book = Workbook::new();
+    set(&mut book, "A1", "1");
+    set(&mut book, "A1", "2");
+    book.undo().unwrap();
+    assert!(book.can_redo());
+
+    set(&mut book, "B1", "something else");
+    assert!(!book.can_redo());
+    assert_eq!(number(&book, "A1"), 1.0);
+}
+
+#[test]
+fn the_recalculation_that_an_undo_causes_is_not_itself_undoable() {
+    // B1 recomputes when A1 is taken back. That is the machine's doing, not
+    // the user's, and must not become a step they have to undo twice.
+    let mut book = Workbook::new();
+    set(&mut book, "A1", "1");
+    set(&mut book, "B1", "=A1+1");
+    let before = book.can_undo();
+    assert!(before);
+
+    book.undo().unwrap();
+    book.undo().unwrap();
+    assert!(!book.can_undo(), "two edits, two undos, and no extra steps");
+}
+
+#[test]
+fn undo_reports_which_cells_need_repainting() {
+    let mut book = Workbook::new();
+    set(&mut book, "A1", "10");
+    set(&mut book, "B1", "=A1*2");
+    set(&mut book, "A1", "50");
+
+    let report = book.undo().unwrap();
+    assert!(report.changed.contains(&a(&book, "A1")));
+    assert!(report.changed.contains(&a(&book, "B1")));
+}
+
+#[test]
+fn a_cycle_created_and_then_undone_leaves_nothing_behind() {
+    let mut book = Workbook::new();
+    set(&mut book, "A1", "5");
+    let addr = a(&book, "A1");
+    let report = book.set_input(addr, "=A1+1");
+    assert!(report.is_circular());
+
+    let report = book.undo().unwrap();
+    assert!(!report.is_circular());
+    assert_eq!(number(&book, "A1"), 5.0);
+}

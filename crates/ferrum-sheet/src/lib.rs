@@ -13,11 +13,13 @@
 pub mod axis;
 pub mod cell;
 pub mod graph;
+pub mod history;
 pub mod sheet;
 pub mod workbook;
 
 pub use axis::Axis;
 pub use cell::{Cell, Input};
 pub use graph::{Dependency, DependencyGraph};
+pub use history::{Change, History};
 pub use sheet::Sheet;
 pub use workbook::{RecalcReport, SheetError, Workbook};
