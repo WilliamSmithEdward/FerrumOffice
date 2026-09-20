@@ -1035,6 +1035,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrum-xlsx"
+version = "0.1.0"
+dependencies = [
+ "ferrum-core",
+ "ferrum-sheet",
+]
+
+[[package]]
 name = "field-offset"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

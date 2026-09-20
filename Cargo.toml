@@ -5,6 +5,7 @@ members = [
     "crates/ferrum-theme",
     "crates/ferrum-calc",
     "crates/ferrum-sheet",
+    "crates/ferrum-xlsx",
     "apps/ferrum-grid",
 ]
 
@@ -23,6 +24,7 @@ ferrum-core = { path = "crates/ferrum-core" }
 ferrum-theme = { path = "crates/ferrum-theme" }
 ferrum-calc = { path = "crates/ferrum-calc" }
 ferrum-sheet = { path = "crates/ferrum-sheet" }
+ferrum-xlsx = { path = "crates/ferrum-xlsx" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

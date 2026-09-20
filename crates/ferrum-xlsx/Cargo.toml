@@ -1,0 +1,17 @@
+[package]
+name = "ferrum-xlsx"
+description = "Reading and writing spreadsheet files, from the ZIP container up."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A spreadsheet file is a ZIP of XML. Both are written here rather than taken
+# from the registry. See docs/adr/0002-no-runtime-dependencies.md.
+[dependencies]
+ferrum-core.workspace = true
+ferrum-sheet.workspace = true
+
+[lints]
+workspace = true
