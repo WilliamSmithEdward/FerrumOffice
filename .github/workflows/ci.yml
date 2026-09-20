@@ -5,34 +5,66 @@ on:
     branches: [main]
   pull_request:
 
+# A push supersedes the run still going for the same branch, rather than
+# queueing another twenty-minute Windows build behind it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
-  # A warning that nobody sees is a warning that accumulates.
+  # A warning nobody sees is a warning that accumulates.
   RUSTFLAGS: -D warnings
 
 jobs:
-  check:
-    # Windows because that is what the application targets, and because the
-    # hosted runner uses the MSVC toolchain, which avoids the missing import
-    # library described in docs/building-on-windows.md.
-    runs-on: windows-latest
-
+  # The library crates have no dependencies at all, so this finishes in under
+  # a minute and is where almost every mistake is caught. It runs on Linux
+  # because nothing in it is platform-specific.
+  engine:
+    name: Engine
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Toolchain
-        run: |
-          rustc --version
-          cargo --version
 
       - name: Format
         run: cargo fmt --all --check
 
       - name: Test
-        run: cargo test --workspace
+        run: >
+          cargo test
+          -p ferrum-core -p ferrum-theme -p ferrum-calc -p ferrum-sheet
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: >
+          cargo clippy --all-targets
+          -p ferrum-core -p ferrum-theme -p ferrum-calc -p ferrum-sheet
 
-      - name: Build the application
+  # The application pulls in the GUI toolkit, which is most of the build time.
+  # Windows because that is what it targets, and because the hosted runner
+  # uses MSVC, avoiding the missing import library that the GNU toolchain has
+  # (see docs/building-on-windows.md).
+  app:
+    name: Application
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Test
+        run: cargo test -p ferrum-grid
+
+      - name: Clippy
+        run: cargo clippy --all-targets -p ferrum-grid
+
+      - name: Build
         run: cargo build --release -p ferrum-grid
